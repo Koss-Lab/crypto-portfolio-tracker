@@ -74,7 +74,7 @@ crypto-portfolio-tracker/
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/<your-username>/crypto-portfolio-tracker.git
+git clone https://github.com/Koss-Lab/crypto-portfolio-tracker.git
 cd crypto-portfolio-tracker
 ```
 
