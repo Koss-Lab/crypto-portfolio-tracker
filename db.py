@@ -4,6 +4,8 @@ import psycopg2
 import os
 from dotenv import load_dotenv
 
+load_dotenv(dotenv_path=os.path.join("crypto_venv", ".env"))
+
 def init_db():
     load_dotenv()
 
