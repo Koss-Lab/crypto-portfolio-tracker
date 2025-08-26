@@ -1,56 +1,58 @@
-# 📘 README – Crypto Portfolio Tracker
-
-```markdown
 # 💹 Crypto Portfolio Tracker
 
 ## 📌 Overview
-Crypto Portfolio Tracker is a Python application that allows users to **track and analyze their cryptocurrency investments**.  
+
+Crypto Portfolio Tracker is a Python application that allows users to **track and analyze their cryptocurrency investments**.
 The app connects to the **CoinGecko API** to fetch live prices, stores user transactions in a **PostgreSQL database**, and provides tools to view portfolios, manage transactions, and export reports.
 
 This project was built during the **Developers Institute Hackathon** and showcases:
-- ✅ Python
-- ✅ PostgreSQL (database)
-- ✅ psycopg2 (DB connection)
-- ✅ Requests (API calls)
-- ✅ Faker (generate fake users/transactions)
-- ✅ JSON & CSV (export data)
-- ✅ CLI Application
+
+* ✅ Python
+* ✅ PostgreSQL (database)
+* ✅ psycopg2 (DB connection)
+* ✅ Requests (API calls)
+* ✅ Faker (generate fake users/transactions)
+* ✅ JSON & CSV (export data)
+* ✅ CLI Application
 
 ---
 
 ## ⚡ Features
 
 ### Core Features
-- Add **BUY/SELL/SEND/RECEIVE** transactions  
-- Store transactions in PostgreSQL  
-- Fetch live crypto prices from CoinGecko API  
-- Calculate current portfolio value  
-- Show portfolio of a single user or all users  
-- Export portfolios to **CSV & JSON**  
-- Export detailed **transactions of a user** (bank statement style)  
+
+* Add **BUY/SELL/SEND/RECEIVE** transactions
+* Store transactions in PostgreSQL
+* Fetch live crypto prices from CoinGecko API
+* Calculate current portfolio value
+* Show portfolio of a single user or all users
+* Export portfolios to **CSV & JSON**
+* Export detailed **transactions of a user** (bank statement style)
 
 ### Extra Features
-- Delete or update a transaction  
-- Show **Top 5 richest users** by portfolio value  
-- Search users by username/email  
-- Interactive **CLI menu** (14 options)  
+
+* Delete or update a transaction
+* Show **Top 5 richest users** by portfolio value
+* Search users by username/email
+* Interactive **CLI menu** (14 options)
 
 ---
 
 ## 🛠️ Technologies Used
-- **Python 3.10+**
-- **PostgreSQL 17**
-- **psycopg2**
-- **dotenv**
-- **requests**
-- **Faker**
-- **JSON / CSV**
+
+* **Python 3.10+**
+* **PostgreSQL 17**
+* **psycopg2**
+* **dotenv**
+* **requests**
+* **Faker**
+* **JSON / CSV**
 
 ---
 
 ## 📂 Project Structure
-```
 
+```
 crypto-portfolio-tracker/
 │
 ├── db.py             # Initialize DB with schema.sql
@@ -61,20 +63,20 @@ crypto-portfolio-tracker/
 ├── export.py         # Export portfolios + transactions
 ├── main.py           # CLI menu (14 options)
 ├── queries.sql       # Useful SQL queries
-├── crypto\_venv/      # Virtual environment
+├── crypto_venv/      # Virtual environment
 └── .env              # Environment variables (DB + API key)
-
-````
+```
 
 ---
 
 ## ⚙️ Setup & Installation
 
 1. **Clone the repo**
+
    ```bash
    git clone https://github.com/<your-username>/crypto-portfolio-tracker.git
    cd crypto-portfolio-tracker
-````
+   ```
 
 2. **Create virtual environment**
 
@@ -194,5 +196,4 @@ id,coin,transaction_type,amount,price,date
 * **Ariel Kossmann**
 * **David Yarden**
 
-Built with ❤️ during the **Developers Institute Hackathon 2025**.
-
+## Built with ❤️ during the **Developers Institute Hackathon 2025**.
