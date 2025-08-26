@@ -69,46 +69,64 @@ crypto-portfolio-tracker/
 
 ---
 
-## ⚙️ Setup & Installation
+## ⚙️ Step-by-Step Setup
 
-1. **Clone the repo**
+### 1. Clone the repository
 
-   ```bash
-   git clone https://github.com/<your-username>/crypto-portfolio-tracker.git
-   cd crypto-portfolio-tracker
-   ```
+```bash
+git clone https://github.com/<your-username>/crypto-portfolio-tracker.git
+cd crypto-portfolio-tracker
+```
 
-2. **Create virtual environment**
+### 2. Create and activate a virtual environment
 
-   ```bash
-   python3 -m venv crypto_venv
-   source crypto_venv/bin/activate
-   pip install -r requirements.txt
-   ```
+```bash
+python3 -m venv crypto_venv
+source crypto_venv/bin/activate   # Mac/Linux
+crypto_venv\Scripts\activate      # Windows PowerShell
+```
 
-3. **Set up environment variables**
-   Create a `.env` file in `crypto_venv/` with:
+### 3. Install dependencies
 
-   ```
-   DB_NAME=crypto_portfolio
-   DB_USER=postgres
-   DB_PASSWORD=your_password
-   DB_HOST=localhost
-   DB_PORT=5432
-   COINGECKO_API_KEY=your_api_key
-   ```
+```bash
+pip install -r requirements.txt
+```
 
-4. **Initialize the database**
+### 4. Configure PostgreSQL
 
-   ```bash
-   python3 db.py
-   ```
+Make sure PostgreSQL is installed and running.
+Create a database named `crypto_portfolio`:
 
-5. **Seed fake users & transactions**
+```sql
+CREATE DATABASE crypto_portfolio;
+```
 
-   ```bash
-   python3 seed.py
-   ```
+### 5. Create a `.env` file
+
+Inside the folder `crypto_venv/`, create a file named `.env` and add your credentials:
+
+```
+DB_NAME=crypto_portfolio
+DB_USER=postgres
+DB_PASSWORD=your_password
+DB_HOST=localhost
+DB_PORT=5432
+COINGECKO_API_KEY=your_api_key
+```
+
+👉 You can get a free API key from [CoinGecko](https://www.coingecko.com/).
+
+### 6. Initialize the database schema
+
+```bash
+python3 db.py
+```
+
+### 7. Seed fake users & transactions
+
+```bash
+python3 seed.py
+```
 
 ---
 
@@ -120,7 +138,7 @@ Run the main app:
 python3 main.py
 ```
 
-Menu example:
+You will see this menu:
 
 ```
 =============================
@@ -196,4 +214,4 @@ id,coin,transaction_type,amount,price,date
 * **Ariel Kossmann**
 * **David Yarden**
 
-## Built with ❤️ during the **Developers Institute Hackathon 2025**.
+Built with ❤️ during the **Developers Institute Hackathon 2025**.
