@@ -1,4 +1,18 @@
 crypto_venv/
 __pycache__/
 *.pyc
-.env
+crypto_venv/.env
+
+
+# Python
+__pycache__/
+*.pyc
+
+# Venv
+crypto_venv/
+
+# Env files
+crypto_venv/.env
+
+# OS files
+.DS_Store
