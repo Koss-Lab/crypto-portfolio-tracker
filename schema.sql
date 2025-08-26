@@ -14,10 +14,11 @@ CREATE TABLE transactions (
     coin VARCHAR(20) NOT NULL,
     amount NUMERIC NOT NULL,
     price NUMERIC NOT NULL,
-    transaction_type VARCHAR(10) CHECK (transaction_type IN ('BUY','SELL')),
+    transaction_type VARCHAR(10) CHECK (transaction_type IN ('BUY','SELL','SEND','RECEIVE')),
     date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
+-- Prices table
 DROP TABLE IF EXISTS prices CASCADE;
 CREATE TABLE prices (
     id SERIAL PRIMARY KEY,
