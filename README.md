@@ -1,8 +1,3 @@
-Parfait frérot 🔥, je te prépare un **README complet**, prêt à coller dans ton repo GitHub.
-Il sera structuré pour **impressionner le jury** tout en respectant les guidelines de l’école.
-
----
-
 # 📘 README – Crypto Portfolio Tracker
 
 ```markdown
