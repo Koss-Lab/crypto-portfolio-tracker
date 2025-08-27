@@ -18,7 +18,7 @@ CREATE TABLE transactions (
     date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
 
--- Prices table
+-- Prices table (latest snapshots)
 DROP TABLE IF EXISTS prices CASCADE;
 CREATE TABLE prices (
     id SERIAL PRIMARY KEY,
@@ -26,3 +26,28 @@ CREATE TABLE prices (
     price NUMERIC NOT NULL,
     date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
+
+-- FX rates (USD base)
+DROP TABLE IF EXISTS fx_rates CASCADE;
+CREATE TABLE fx_rates (
+    id SERIAL PRIMARY KEY,
+    base_currency VARCHAR(10) NOT NULL DEFAULT 'USD',
+    currency VARCHAR(10) NOT NULL, -- e.g. 'EUR', 'ILS'
+    rate NUMERIC NOT NULL,         -- e.g. 0.92, 3.70
+    date TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_fx_rates_curr_date ON fx_rates(currency, date);
+
+-- Price alerts
+DROP TABLE IF EXISTS alerts CASCADE;
+CREATE TABLE alerts (
+    id SERIAL PRIMARY KEY,
+    user_id INT REFERENCES users(id) ON DELETE CASCADE,
+    coin VARCHAR(20) NOT NULL,
+    operator VARCHAR(1) NOT NULL CHECK (operator IN ('>','<')),
+    threshold NUMERIC NOT NULL,
+    active BOOLEAN NOT NULL DEFAULT TRUE,
+    created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    triggered_at TIMESTAMP
+);
+CREATE INDEX IF NOT EXISTS idx_alerts_active ON alerts(active);

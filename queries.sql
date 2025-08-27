@@ -61,3 +61,20 @@ LIMIT 5;
 
 -- 11. count the number of transactions per type
 SELECT transaction_type, COUNT(*) FROM transactions GROUP BY transaction_type;
+
+-- 12. FX: lasts rates per coin
+SELECT DISTINCT ON (currency) currency, rate, date
+FROM fx_rates
+ORDER BY currency, date DESC;
+
+-- Activate alerts
+SELECT * FROM alerts WHERE active = TRUE ORDER BY created_at DESC;
+
+-- manually deactivate alert
+UPDATE alerts SET active = FALSE, triggered_at = NOW() WHERE id = 123;
+
+-- check last price of a coin
+SELECT DISTINCT ON (coin) coin, price, date
+FROM prices
+WHERE coin = 'BTC'
+ORDER BY coin, date DESC;
