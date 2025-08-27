@@ -8,11 +8,12 @@ NEW:
 - Export the displayed chart to PDF (button).
 - “Alerts” tab: add/list/check price alerts (alerts table).
 - “Portfolio Report (PDF)” export: text + holdings table + Pie + Line.
+- Robust historical loader for ALL coins in CG_IDS (DOGE/ADA etc.), cache-first,
+  multiple endpoints, segmented range fallback, and a “Prewarm Cache” button.
 
 UNCHANGED:
 - CLI and portfolio calculations remain intact.
 - Existing CSV/JSON exports stay in USD.
-- Historical charts: fallback/caching logic unchanged.
 - ***Currency converter removed: everything displays in USD.***
 """
 
@@ -24,6 +25,7 @@ import json
 import csv
 import time
 import random
+import math
 import tempfile
 import datetime as dt
 from decimal import Decimal
@@ -55,7 +57,7 @@ except Exception:
 
 HIST_DEBUG = True
 CACHE_TTL_SECONDS = 6 * 3600
-THROTTLE_BETWEEN_COINS_SEC = 0.45
+THROTTLE_BETWEEN_COINS_SEC = 0.85
 SESSION = requests.Session()
 
 # =====================================================================
@@ -111,7 +113,8 @@ def search_users(keyword: str) -> List[Dict[str, Any]]:
 
 def user_transactions(user_id: int) -> List[Dict[str, Any]]:
     return fetch_all(
-        "SELECT id, coin, transaction_type, amount, price, date "
+        "SELECT id, coin, transaction_type, amount, price "
+        "     , date "
         "FROM transactions WHERE user_id = %s ORDER BY date ASC;",
         (user_id,),
     )
@@ -221,7 +224,7 @@ def portfolio_timeseries_approx(user_id: int) -> List[Tuple[dt.date, float]]:
     return series
 
 # =====================================================================
-# Historical prices (same robust logic as before)
+# Historical prices (robust, cache-first)
 # =====================================================================
 
 CG_IDS = {
@@ -297,7 +300,6 @@ CG_IDS = {
 
     # — Storage —
     "FIL": "filecoin",
-    "AR": "arweave",
 
     # — Popular L2 / ZK ecosystem tokens —
     "STRK": "starknet",
@@ -346,240 +348,226 @@ CG_IDS = {
     "ZEC": "zcash",
     "VET": "vechain",
 
-    # — Requested by you —
+    # — Requested —
     "VRA": "verasity",
 }
 
 STABLES = {"USDT", "USDC", "DAI", "FRAX", "TUSD", "USDD"}
 
+CG_BASE = "https://api.coingecko.com/api/v3"
+CG_CACHE_DIR = ".cg_cache"
+os.makedirs(CG_CACHE_DIR, exist_ok=True)
+
 def _cg_api_key() -> str:
     load_dotenv()
-    return os.getenv("COINGECKO_API_KEY", "").strip()
+    return (os.getenv("COINGECKO_API_KEY") or os.getenv("COINGECKO_API") or "").strip()
 
-def _cg_headers() -> Dict[str, str]:
-    key = _cg_api_key()
-    h = {"Accept": "application/json", "User-Agent": "CryptoPortfolioTracker/1.0 (+tkinter)"}
+def _headers() -> dict:
+    key = (os.getenv("COINGECKO_API_KEY") or os.getenv("COINGECKO_API") or "").strip()
+    h = {"Accept": "application/json", "User-Agent": "CryptoPortfolioTracker/1.0 (+gui)"}
     if key:
-        h.update({"x_cg_demo_api_key": key, "x-cg-pro-api-key": key, "X-CG-API-KEY": key})
+        # on envoie plusieurs variantes pour maximiser l’acceptation côté CG
+        for k in ("x-cg-pro-api-key", "x-cg-demo-api-key", "X-CG-API-KEY", "x_cg_demo_api_key"):
+            h[k] = key
     return h
 
-def _cg_query_auth() -> Dict[str, str]:
-    key = _cg_api_key()
-    return {"x_cg_demo_api_key": key} if key else {}
+def _auth_query() -> dict:
+    # IMPORTANT: ne jamais mettre la clé dans l'URL.
+    # On la met déjà en header dans _headers().
+    return {}
 
-def _cache_dir() -> str:
-    local = os.path.join(os.getcwd(), ".cg_cache")
-    try:
-        os.makedirs(local, exist_ok=True)
-        return local
-    except Exception:
-        home = os.path.join(os.path.expanduser("~"), ".cache", "crypto_portfolio")
-        os.makedirs(home, exist_ok=True)
-        return home
-
-def _cache_key(cg_id: str, days: int) -> str:
-    return os.path.join(_cache_dir(), f"{cg_id}_{days}.json")
+def _cache_path(cg_id: str, days: int) -> str:
+    return os.path.join(CG_CACHE_DIR, f"{cg_id}_{days}.json")
 
 def _cache_get(cg_id: str, days: int) -> Optional[List[List[float]]]:
-    path = _cache_key(cg_id, days)
-    if not os.path.exists(path):
+    p = _cache_path(cg_id, days)
+    if not os.path.exists(p):
         return None
     try:
-        mtime = os.path.getmtime(path)
-        if time.time() - mtime > CACHE_TTL_SECONDS:
+        if time.time() - os.path.getmtime(p) > CACHE_TTL_SECONDS:
             return None
-        with open(path, "r", encoding="utf-8") as f:
+        with open(p, "r", encoding="utf-8") as f:
             data = json.load(f)
         return data.get("prices")
     except Exception:
         return None
 
-def _cache_set(cg_id: str, days: int, prices_payload: List[List[float]]) -> None:
+def _cache_set(cg_id: str, days: int, payload: List[List[float]]) -> None:
     try:
-        with open(_cache_key(cg_id, days), "w", encoding="utf-8") as f:
-            json.dump({"prices": prices_payload, "cached_at": time.time()}, f)
+        with open(_cache_path(cg_id, days), "w", encoding="utf-8") as f:
+            json.dump({"prices": payload, "cached_at": time.time()}, f)
     except Exception:
         pass
 
-def _dedup_per_day(points: List[List[float]]) -> List[Tuple[dt.date, float]]:
-    per_day: Dict[dt.date, float] = {}
-    for ts_ms, price in points:
-        d = dt.datetime.fromtimestamp(ts_ms / 1000, tz=dt.timezone.utc).date()
-        per_day[d] = float(price)
-    return sorted(per_day.items(), key=lambda x: x[0])
+def _dedupe_by_day(prices_array: List[List[float]]) -> List[Tuple[dt.date, float]]:
+    per: Dict[dt.date, float] = {}
+    for ts_ms, price in prices_array:
+        d = dt.date.fromtimestamp(ts_ms / 1000.0)
+        per[d] = float(price)
+    return sorted(per.items(), key=lambda x: x[0])
 
-def _flat_series(days: int, value: float) -> List[Tuple[dt.date, float]]:
-    today = dt.datetime.now(dt.timezone.utc).date()
-    dates = [today - dt.timedelta(days=d) for d in range(days - 1, -1, -1)]
-    return [(d, value) for d in dates]
+def _slice_last_days(series: List[Tuple[dt.date, float]], days: int):
+    if not series:
+        return []
+    cutoff = series[-1][0] - dt.timedelta(days=days-1)
+    return [(d, v) for (d, v) in series if d >= cutoff]
 
-def _request_with_retries(url: str, params: dict, headers: dict, tries: int = 5) -> requests.Response:
+def _req(url: str, params: dict, tries: int = 4) -> dict:
     last = None
-    for k in range(tries):
+    hdrs = _headers()
+    for i in range(tries):
         try:
-            r = SESSION.get(url, params=params, headers=headers, timeout=25)
+            r = SESSION.get(url, params=params, headers=hdrs, timeout=25)
             if r.status_code in (429, 418):
-                sleep_s = (1.6 ** k) + random.uniform(0.4, 0.9)
+                sleep = (1.6 ** i) + random.uniform(0.4, 0.9)
                 if HIST_DEBUG:
-                    print(f"[hist] 429 -> sleeping {sleep_s:.2f}s before retry", file=sys.stderr)
-                time.sleep(sleep_s); continue
+                    print(f"[hist] 429 -> sleeping {sleep:.2f}s before retry")
+                time.sleep(sleep); continue
             if 500 <= r.status_code < 600:
-                time.sleep(0.5 + 0.3 * k); continue
+                time.sleep(0.5 + 0.3 * i); continue
             r.raise_for_status()
-            return r
+            return r.json()
         except requests.RequestException as e:
             last = e
-            time.sleep(0.35 + 0.25 * k + random.uniform(0.0, 0.25))
-    if last: raise last
+            time.sleep(0.35 + 0.25 * i + random.uniform(0.0, 0.25))
+    if last:
+        raise last
     raise RuntimeError("Unknown HTTP error")
 
-def _fetch_range_segmented(cg_id: str, days: int, headers: dict,
-                           seg_days_candidates: Tuple[int, ...] = (120, 90, 60, 30)) -> List[List[float]]:
-    now = int(dt.datetime.now(dt.timezone.utc).timestamp())
+def _fetch_range_segmented(cg_id: str, days: int) -> List[List[float]]:
+    now = int(time.time())
     start = now - days * 86400
-    base = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart/range"
-
-    for seg_days in seg_days_candidates:
-        try:
-            points: List[List[float]] = []
-            cur = start
-            while cur < now:
-                end = min(cur + seg_days * 86400, now)
-                params = {"vs_currency": "usd", "from": cur, "to": end, **_cg_query_auth()}
-                r = _request_with_retries(base, params, headers, tries=4)
-                chunk = r.json().get("prices", [])
-                if chunk:
-                    points.extend(chunk)
-                cur = end
-                time.sleep(random.uniform(0.6, 1.2))
-            if points:
-                if HIST_DEBUG:
-                    print(f"[hist] segmented range OK ({seg_days}d chunks): {len(points)} pts")
-                return points
-        except Exception as e:
-            if HIST_DEBUG:
-                print(f"[hist] segmented range {seg_days}d failed: {e}", file=sys.stderr)
-            continue
-    return []
+    window = 30 * 86400  # 30-day chunks
+    acc: List[List[float]] = []
+    cur = start
+    while cur < now:
+        end = min(cur + window, now)
+        params = {"vs_currency": "usd", "from": cur, "to": end, **_auth_query()}
+        data = _req(f"{CG_BASE}/coins/{cg_id}/market_chart/range", params)
+        acc.extend(data.get("prices", []))
+        cur = end
+        time.sleep(random.uniform(0.15, 0.35))
+    return acc
 
 def fetch_daily_prices_with_reason(symbol: str, days: int) -> Tuple[List[Tuple[dt.date, float]], Optional[str]]:
+    """
+    Returns (series, reason) for SYMBOL over N days.
+    Order: cache -> market_chart(daily) -> market_chart -> max(slice)
+           -> ohlc(slice) -> range segmented. Stablecoins = flat $1 (no calls).
+    """
     sym = symbol.upper()
 
+    # Stablecoins: flat @ $1
     if sym in STABLES:
-        if HIST_DEBUG: print(f"[hist] {sym} flat series @ $1 (stable)")
-        return _flat_series(days, 1.0), None
+        today = dt.date.today()
+        series = [(today - dt.timedelta(days=i), 1.0) for i in range(days-1, -1, -1)]
+        if HIST_DEBUG: print(f"[hist] {sym} flat @ $1 (stable)")
+        return series, None
 
     cg_id = CG_IDS.get(sym)
     if not cg_id:
         return [], f"{sym}: no mapping"
 
-    headers = _cg_headers()
+    # Cache (exact)
+    cached = _cache_get(cg_id, days)
+    if cached:
+        if HIST_DEBUG: print(f"[hist] {sym} CACHE hit (exact {days}): {len(cached)} raw points")
+        return _dedupe_by_day(cached), None
 
-    cached_exact = _cache_get(cg_id, days)
-    if cached_exact:
-        if HIST_DEBUG: print(f"[hist] {sym} CACHE hit (exact {days}): {len(cached_exact)} raw points")
-        return _dedup_per_day(cached_exact), None
-
+    # Cache (parent) slice
     for parent in (365, 180, 90):
         if parent > days:
-            cached_parent = _cache_get(cg_id, parent)
-            if cached_parent:
-                series_parent = _dedup_per_day(cached_parent)
+            cpar = _cache_get(cg_id, parent)
+            if cpar:
+                series_parent = _dedupe_by_day(cpar)
                 if len(series_parent) >= days:
                     if HIST_DEBUG: print(f"[hist] {sym} CACHE slice {parent}->{days}")
                     return series_parent[-days:], None
 
-    base = f"https://api.coingecko.com/api/v3/coins/{cg_id}/market_chart"
+    reason = None
 
-    day_candidates = [d for d in [days, 365, 180, 90, 30] if isinstance(d, int) and d > 0]
-    param_variants = [
-        lambda d: {"vs_currency": "usd", "days": d, "precision": "full"},
-        lambda d: {"vs_currency": "usd", "days": d, "precision": "full", "interval": "daily"},
-        lambda d: {"vs_currency": "usd", "days": d},
-        lambda d: {"vs_currency": "usd", "days": d, "interval": "daily"},
-    ]
-
-    for d in day_candidates:
-        for make_params in param_variants:
-            params = make_params(d)
-            params.update(_cg_query_auth())
-            label = "daily" if "interval" in params else "standard"
-            lbl = f"{label} d={d} {'+full' if params.get('precision')=='full' else ''}"
-            try:
-                r = _request_with_retries(base, params, headers, tries=4)
-                data = r.json().get("prices", [])
-                if data:
-                    series = _dedup_per_day(data)
-                    if d != days and len(series) >= days:
-                        series = series[-days:]
-                    prices_payload = [
-                        [int(dt.datetime.combine(date, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000), price]
-                        for date, price in series
-                    ]
-                    _cache_set(cg_id, days, prices_payload)
-                    if HIST_DEBUG: print(f"[hist] {sym} OK via {lbl}: {len(series)} pts (cached)")
-                    time.sleep(random.uniform(0.15, 0.35))
-                    return series, None
-            except Exception as e:
-                if HIST_DEBUG: print(f"[hist] {sym} via {lbl}: {e}", file=sys.stderr)
-                time.sleep(random.uniform(0.2, 0.6))
-
+    # 1) market_chart (interval=daily)
     try:
-        params = {"vs_currency": "usd", "days": "max", "precision": "full", **_cg_query_auth()}
-        r = _request_with_retries(base, params, headers, tries=4)
-        data = r.json().get("prices", [])
-        if data:
-            series_all = _dedup_per_day(data)
+        params = {"vs_currency": "usd", "days": int(days), "interval": "daily", **_auth_query()}
+        data = _req(f"{CG_BASE}/coins/{cg_id}/market_chart", params)
+        arr = data.get("prices", [])
+        if arr:
+            series = _dedupe_by_day(arr)
+            if len(series) > days:
+                series = series[-days:]
+            payload = [[int(dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000), v]
+                       for d, v in series]
+            _cache_set(cg_id, days, payload)
+            if HIST_DEBUG: print(f"[hist] {sym} OK via standard+daily: {len(series)} pts")
+            return series, None
+    except Exception as e:
+        reason = f"daily: {getattr(e, 'args', [str(e)])[0]}"
+
+    # 2) market_chart (standard)
+    try:
+        params = {"vs_currency": "usd", "days": int(days), **_auth_query()}
+        data = _req(f"{CG_BASE}/coins/{cg_id}/market_chart", params)
+        arr = data.get("prices", [])
+        if arr:
+            series = _dedupe_by_day(arr)
+            if len(series) > days:
+                series = series[-days:]
+            payload = [[int(dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000), v]
+                       for d, v in series]
+            _cache_set(cg_id, days, payload)
+            if HIST_DEBUG: print(f"[hist] {sym} OK via standard: {len(series)} pts")
+            return series, None
+    except Exception as e:
+        reason = f"{reason or ''}; standard: {getattr(e, 'args', [str(e)])[0]}"
+
+    # 3) days=max then slice
+    try:
+        params = {"vs_currency": "usd", "days": "max", "interval": "daily", **_auth_query()}
+        data = _req(f"{CG_BASE}/coins/{cg_id}/market_chart", params)
+        arr = data.get("prices", [])
+        if arr:
+            series_all = _dedupe_by_day(arr)
             series = series_all[-days:] if len(series_all) > days else series_all
-            prices_payload = [
-                [int(dt.datetime.combine(date, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000), price]
-                for date, price in series
-            ]
-            _cache_set(cg_id, days, prices_payload)
-            if HIST_DEBUG: print(f"[hist] {sym} OK via max: {len(series)} pts (cached)")
-            time.sleep(random.uniform(0.15, 0.35))
+            payload = [[int(dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000), v]
+                       for d, v in series]
+            _cache_set(cg_id, days, payload)
+            if HIST_DEBUG: print(f"[hist] {sym} OK via max->slice: {len(series)} pts")
             return series, None
     except Exception as e:
-        if HIST_DEBUG: print(f"[hist] {sym} via max: {e}", file=sys.stderr)
+        reason = f"{reason or ''}; max: {getattr(e, 'args', [str(e)])[0]}"
 
+    # 4) ohlc with nearest allowed period then slice
     try:
-        now = int(dt.datetime.now(dt.timezone.utc).timestamp())
-        params = {"vs_currency": "usd", "from": now - days * 86400, "to": now, **_cg_query_auth()}
-        r = _request_with_retries(f"{base}/range", params, headers, tries=4)
-        data = r.json().get("prices", [])
-        if data:
-            _cache_set(cg_id, days, data)
-            series = _dedup_per_day(data)
-            if HIST_DEBUG: print(f"[hist] {sym} OK via range: {len(series)} pts (cached)")
-            time.sleep(random.uniform(0.15, 0.35))
+        allowed = [365, 180, 90, 30, 14, 7]
+        d_used = next((d for d in allowed if d <= int(days)), 7)
+        params = {"vs_currency": "usd", "days": d_used, **_auth_query()}
+        arr = _req(f"{CG_BASE}/coins/{cg_id}/ohlc", params)
+        if isinstance(arr, list) and arr:
+            prices = [[row[0], row[4]] for row in arr]
+            series = _slice_last_days(_dedupe_by_day(prices), days)
+            payload = [[int(dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000), v]
+                       for d, v in series]
+            _cache_set(cg_id, days, payload)
+            if HIST_DEBUG: print(f"[hist] {sym} OK via ohlc({d_used})->slice: {len(series)} pts")
             return series, None
     except Exception as e:
-        if HIST_DEBUG: print(f"[hist] {sym} via range: {e}", file=sys.stderr)
+        reason = f"{reason or ''}; ohlc: {getattr(e, 'args', [str(e)])[0]}"
 
+    # 5) range segmented (30d windows)
     try:
-        params = {"vs_currency": "usd", "days": days, **_cg_query_auth()}
-        r = _request_with_retries(f"https://api.coingecko.com/api/v3/coins/{cg_id}/ohlc", params, headers, tries=4)
-        ohlc = r.json()
-        data = [[row[0], row[4]] for row in ohlc] if isinstance(ohlc, list) else []
-        if data:
-            _cache_set(cg_id, days, data)
-            series = _dedup_per_day(data)
-            if HIST_DEBUG: print(f"[hist] {sym} OK via ohlc: {len(series)} pts (cached)")
-            time.sleep(random.uniform(0.15, 0.35))
+        seg = _fetch_range_segmented(cg_id, int(days))
+        if seg:
+            series = _slice_last_days(_dedupe_by_day(seg), days)
+            payload = [[int(dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000), v]
+                       for d, v in series]
+            _cache_set(cg_id, days, payload)
+            if HIST_DEBUG: print(f"[hist] {sym} OK via range(30d): {len(series)} pts")
             return series, None
     except Exception as e:
-        if HIST_DEBUG: print(f"[hist] {sym} via ohlc: {e}", file=sys.stderr)
+        reason = f"{reason or ''}; range: {getattr(e, 'args', [str(e)])[0]}"
 
-    try:
-        seg_points = _fetch_range_segmented(cg_id, days, headers)
-        if seg_points:
-            _cache_set(cg_id, days, seg_points)
-            series = _dedup_per_day(seg_points)
-            return series[-days:], None
-    except Exception:
-        pass
-
-    return [], f"{sym}: unknown error"
+    if HIST_DEBUG: print(f"[hist] OK coins: none")
+    return [], (reason or "no data")
 
 # =====================================================================
 # Alerts (DB helpers)
@@ -797,6 +785,11 @@ class App(tk.Tk):
         ttk.Button(ctl, text="Draw Line (Historical)", command=self.draw_line).pack(side="left", padx=(6, 0))
         ttk.Button(ctl, text="Export Chart (PDF)", command=self.export_current_chart_pdf).pack(side="left", padx=(12, 0))
         ttk.Button(ctl, text="Export Report (PDF)", command=self.action_export_pdf_report).pack(side="left", padx=(6, 0))
+        ttk.Button(
+            ctl,
+            text="Prewarm Cache (365/180/90)",
+            command=self.action_prewarm_cache
+        ).pack(side="left", padx=(6, 0))
 
         self.chart_area = ttk.Frame(frame); self.chart_area.pack(fill="both", expand=True, pady=8)
 
@@ -934,6 +927,57 @@ class App(tk.Tk):
             messagebox.showinfo("Saved", f"Chart exported to:\n{path}")
         except Exception as e:
             messagebox.showerror("Error", str(e))
+
+    def action_prewarm_cache(self) -> None:
+        """
+        Fetch & cache historical prices for ALL coins in CG_IDS (except stablecoins)
+        for 365, 180 and 90 days. Uses existing caching pipeline so charts are instant.
+        """
+        try:
+            coins = sorted([c for c in CG_IDS.keys() if c.upper() not in STABLES])
+            days_list = [365, 180, 90]
+
+            if not coins:
+                messagebox.showinfo("Prewarm", "No coins to prewarm.");
+                return
+
+            messagebox.showinfo(
+                "Prewarm starting",
+                "Caching historical series for all mapped coins "
+                "(365/180/90 days). This may take a while depending on your API limits."
+            )
+
+            ok, failed = [], []
+            for sym in coins:
+                for d in days_list:
+                    time.sleep(THROTTLE_BETWEEN_COINS_SEC)
+                    try:
+                        series, reason = fetch_daily_prices_with_reason(sym, d)
+                        if series:
+                            ok.append(f"{sym}:{d}")
+                        else:
+                            failed.append(f"{sym}:{d} -> {reason or 'no data'}")
+                    except Exception as e:
+                        failed.append(f"{sym}:{d} -> {e}")
+
+                time.sleep(random.uniform(0.15, 0.45))
+
+            msg = [f"✅ Cached: {len(ok)} series", f"⚠️ Failed: {len(failed)}"]
+            if failed:
+                try:
+                    logpath = os.path.join(tempfile.gettempdir(), "cg_prewarm_failures.txt")
+                    with open(logpath, "w", encoding="utf-8") as f:
+                        f.write("\n".join(failed))
+                    msg.append(f"(details saved to {logpath})")
+                except Exception:
+                    msg.append("\n- " + "\n- ".join(failed[:20]))
+                    if len(failed) > 20:
+                        msg.append(f"...and {len(failed) - 20} more")
+
+            messagebox.showinfo("Prewarm finished", "\n".join(msg))
+
+        except Exception as e:
+            messagebox.showerror("Prewarm error", str(e))
 
     # ---------------- Alerts tab ----------------
 
