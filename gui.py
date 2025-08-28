@@ -9,7 +9,8 @@ NEW:
 - “Alerts” tab: add/list/check price alerts (alerts table).
 - “Portfolio Report (PDF)” export: text + holdings table + Pie + Line.
 - Robust historical loader for ALL coins in CG_IDS (DOGE/ADA etc.), cache-first,
-  multiple endpoints, segmented range fallback, and a “Prewarm Cache” button.
+  multiple endpoints, segmented range fallback, and a “Smart Prewarm” button
+  (downloads 365d once, derives 180/90d locally).
 
 UNCHANGED:
 - CLI and portfolio calculations remain intact.
@@ -25,7 +26,6 @@ import json
 import csv
 import time
 import random
-import math
 import tempfile
 import datetime as dt
 from decimal import Decimal
@@ -55,9 +55,12 @@ try:
 except Exception:
     api_module = None
 
+# ---------------------------------------------------------------------
+# Tunables
+# ---------------------------------------------------------------------
 HIST_DEBUG = True
-CACHE_TTL_SECONDS = 6 * 3600
-THROTTLE_BETWEEN_COINS_SEC = 0.85
+CACHE_TTL_SECONDS = 6 * 3600      # 6h validity for cached historical series
+THROTTLE_BETWEEN_COINS_SEC = 0.85 # gentle pacing between API calls
 SESSION = requests.Session()
 
 # =====================================================================
@@ -113,8 +116,7 @@ def search_users(keyword: str) -> List[Dict[str, Any]]:
 
 def user_transactions(user_id: int) -> List[Dict[str, Any]]:
     return fetch_all(
-        "SELECT id, coin, transaction_type, amount, price "
-        "     , date "
+        "SELECT id, coin, transaction_type, amount, price, date "
         "FROM transactions WHERE user_id = %s ORDER BY date ASC;",
         (user_id,),
     )
@@ -228,127 +230,51 @@ def portfolio_timeseries_approx(user_id: int) -> List[Tuple[dt.date, float]]:
 # =====================================================================
 
 CG_IDS = {
-    # — L1s / Majors —
-    "BTC": "bitcoin",
-    "ETH": "ethereum",
-    "SOL": "solana",
-    "BNB": "binancecoin",
-    "XRP": "ripple",
-    "ADA": "cardano",
-    "DOGE": "dogecoin",
-    "TRX": "tron",
-    "DOT": "polkadot",
-    "LTC": "litecoin",
-    "ATOM": "cosmos",
-    "NEAR": "near",
-    "AVAX": "avalanche-2",
-    "TON": "toncoin",
-    "MATIC": "matic-network",
-    "POL": "pol-ex-matic",
-    "ETC": "ethereum-classic",
-    "ICP": "internet-computer",
-    "ALGO": "algorand",
-    "EGLD": "multiversx",
-    "KAS": "kaspa",
-    "SEI": "sei-network",
-    "TIA": "celestia",
-    "STX": "stacks",
-    "RON": "ronin",
-    "AR": "arweave",
-    "OP": "optimism",
-    "ARB": "arbitrum",
-    "APT": "aptos",
-    "SUI": "sui",
-    "KAVA": "kava",
-    "FTM": "fantom",
-    "HBAR": "hedera-hashgraph",
-
-    # — Stablecoins —
-    "USDT": "tether",
-    "USDC": "usd-coin",
-    "DAI": "dai",
-    "FRAX": "frax",
-    "TUSD": "true-usd",
-    "USDD": "usdd",
-
-    # — Wrapped / staking primitives —
-    "WBTC": "wrapped-bitcoin",
-    "WETH": "weth",
-    "RPL": "rocket-pool",
-    "LDO": "lido-dao",
-
-    # — DeFi blue chips & infra —
-    "AAVE": "aave",
-    "UNI": "uniswap",
-    "SNX": "synthetix-network-token",
-    "COMP": "compound-governance-token",
-    "GMX": "gmx",
-    "DYDX": "dydx",
-    "PENDLE": "pendle",
-    "AERO": "aerodrome-finance",
-    "ONDO": "ondo",
-    "ETHFI": "ether-fi",
-    "W": "wormhole",
-
-    # — Oracles / data —
-    "LINK": "chainlink",
-    "PYTH": "pyth-network",
-
-    # — AI / compute —
-    "RNDR": "render",
-    "GRT": "the-graph",
-
-    # — Storage —
+    # L1 / majors
+    "BTC": "bitcoin", "ETH": "ethereum", "SOL": "solana", "BNB": "binancecoin",
+    "XRP": "ripple", "ADA": "cardano", "DOGE": "dogecoin", "TRX": "tron",
+    "DOT": "polkadot", "LTC": "litecoin", "ATOM": "cosmos", "NEAR": "near",
+    "AVAX": "avalanche-2", "TON": "toncoin", "MATIC": "matic-network",
+    "POL": "pol-ex-matic", "ETC": "ethereum-classic", "ICP": "internet-computer",
+    "ALGO": "algorand", "EGLD": "multiversx", "KAS": "kaspa", "SEI": "sei-network",
+    "TIA": "celestia", "STX": "stacks", "RON": "ronin", "AR": "arweave",
+    "OP": "optimism", "ARB": "arbitrum", "APT": "aptos", "SUI": "sui",
+    "KAVA": "kava", "FTM": "fantom", "HBAR": "hedera-hashgraph",
+    # stables
+    "USDT": "tether", "USDC": "usd-coin", "DAI": "dai", "FRAX": "frax",
+    "TUSD": "true-usd", "USDD": "usdd",
+    # wrapped / staking
+    "WBTC": "wrapped-bitcoin", "WETH": "weth", "RPL": "rocket-pool", "LDO": "lido-dao",
+    # DeFi / infra
+    "AAVE": "aave", "UNI": "uniswap", "SNX": "synthetix-network-token",
+    "COMP": "compound-governance-token", "GMX": "gmx", "DYDX": "dydx",
+    "PENDLE": "pendle", "AERO": "aerodrome-finance", "ONDO": "ondo",
+    "ETHFI": "ether-fi", "W": "wormhole",
+    # Oracles / data
+    "LINK": "chainlink", "PYTH": "pyth-network",
+    # AI / compute
+    "RNDR": "render", "GRT": "the-graph",
+    # Storage
     "FIL": "filecoin",
-
-    # — Popular L2 / ZK ecosystem tokens —
-    "STRK": "starknet",
-    "ZK": "zksync",
-
-    # — Solana ecosystem (popular) —
-    "JUP": "jupiter",
-    "JTO": "jito",
-    "RAY": "raydium",
-    "BONK": "bonk",
-    "WIF": "dogwifhat",
-
-    # — Meme / community favorites —
-    "PEPE": "pepe",
-    "SHIB": "shiba-inu",
-    "FLOKI": "floki",
-
-    # — Exchange & governance / misc majors —
-    "INJ": "injective",
-    "MKR": "maker",
-    "RUNE": "thorchain",
-    "LRC": "loopring",
-
-    # — Gaming & metaverse —
-    "AXS": "axie-infinity",
-    "SAND": "the-sandbox",
-    "MANA": "decentraland",
-    "IMX": "immutable",
-
-    # — CEX / wallet tokens & misc —
-    "TWT": "trust-wallet-token",
-    "JASMY": "jasmycoin",
-    "JOE": "joe",
-
-    # — “Worldcoin / identity” etc —
+    # L2 / ZK
+    "STRK": "starknet", "ZK": "zksync",
+    # Solana eco
+    "JUP": "jupiter", "JTO": "jito", "RAY": "raydium", "BONK": "bonk", "WIF": "dogwifhat",
+    # Memes
+    "PEPE": "pepe", "SHIB": "shiba-inu", "FLOKI": "floki",
+    # Exchange & governance / misc majors
+    "INJ": "injective", "MKR": "maker", "RUNE": "thorchain", "LRC": "loopring",
+    # Gaming
+    "AXS": "axie-infinity", "SAND": "the-sandbox", "MANA": "decentraland", "IMX": "immutable",
+    # Wallet/CEX & misc
+    "TWT": "trust-wallet-token", "JASMY": "jasmycoin", "JOE": "joe",
+    # Worldcoin / identity
     "WLD": "worldcoin",
-
-    # — BTC ordinals / inscriptions leaders —
+    # BTC ordinals
     "ORDI": "ordi",
-
-    # — Additional widely-held L1/L0 tokens —
-    "BCH": "bitcoin-cash",
-    "XLM": "stellar",
-    "XMR": "monero",
-    "DASH": "dash",
-    "ZEC": "zcash",
-    "VET": "vechain",
-
-    # — Requested —
+    # More majors
+    "BCH": "bitcoin-cash", "XLM": "stellar", "XMR": "monero", "DASH": "dash", "ZEC": "zcash", "VET": "vechain",
+    # Requested
     "VRA": "verasity",
 }
 
@@ -363,19 +289,18 @@ def _cg_api_key() -> str:
     return (os.getenv("COINGECKO_API_KEY") or os.getenv("COINGECKO_API") or "").strip()
 
 def _headers() -> dict:
-    key = (os.getenv("COINGECKO_API_KEY") or os.getenv("COINGECKO_API") or "").strip()
+    # clé UNIQUEMENT en headers (jamais en query)
+    key = _cg_api_key()
     h = {"Accept": "application/json", "User-Agent": "CryptoPortfolioTracker/1.0 (+gui)"}
     if key:
-        # on envoie plusieurs variantes pour maximiser l’acceptation côté CG
         for k in ("x-cg-pro-api-key", "x-cg-demo-api-key", "X-CG-API-KEY", "x_cg_demo_api_key"):
             h[k] = key
     return h
 
 def _auth_query() -> dict:
-    # IMPORTANT: ne jamais mettre la clé dans l'URL.
-    # On la met déjà en header dans _headers().
-    return {}
+    return {}  # never put the key in query-string
 
+# ---- cache helpers ----
 def _cache_path(cg_id: str, days: int) -> str:
     return os.path.join(CG_CACHE_DIR, f"{cg_id}_{days}.json")
 
@@ -391,6 +316,21 @@ def _cache_get(cg_id: str, days: int) -> Optional[List[List[float]]]:
         return data.get("prices")
     except Exception:
         return None
+
+def _cache_get_raw(cg_id: str, days: int) -> Optional[List[List[float]]]:
+    """Read cached file even if older than TTL (handy to slice from 365 -> 180/90)."""
+    p = _cache_path(cg_id, days)
+    if not os.path.exists(p):
+        return None
+    try:
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return data.get("prices")
+    except Exception:
+        return None
+
+def _ms(d: dt.date) -> int:
+    return int(dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000)
 
 def _cache_set(cg_id: str, days: int, payload: List[List[float]]) -> None:
     try:
@@ -495,8 +435,7 @@ def fetch_daily_prices_with_reason(symbol: str, days: int) -> Tuple[List[Tuple[d
             series = _dedupe_by_day(arr)
             if len(series) > days:
                 series = series[-days:]
-            payload = [[int(dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000), v]
-                       for d, v in series]
+            payload = [[_ms(d), v] for d, v in series]
             _cache_set(cg_id, days, payload)
             if HIST_DEBUG: print(f"[hist] {sym} OK via standard+daily: {len(series)} pts")
             return series, None
@@ -512,8 +451,7 @@ def fetch_daily_prices_with_reason(symbol: str, days: int) -> Tuple[List[Tuple[d
             series = _dedupe_by_day(arr)
             if len(series) > days:
                 series = series[-days:]
-            payload = [[int(dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000), v]
-                       for d, v in series]
+            payload = [[_ms(d), v] for d, v in series]
             _cache_set(cg_id, days, payload)
             if HIST_DEBUG: print(f"[hist] {sym} OK via standard: {len(series)} pts")
             return series, None
@@ -528,8 +466,7 @@ def fetch_daily_prices_with_reason(symbol: str, days: int) -> Tuple[List[Tuple[d
         if arr:
             series_all = _dedupe_by_day(arr)
             series = series_all[-days:] if len(series_all) > days else series_all
-            payload = [[int(dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000), v]
-                       for d, v in series]
+            payload = [[_ms(d), v] for d, v in series]
             _cache_set(cg_id, days, payload)
             if HIST_DEBUG: print(f"[hist] {sym} OK via max->slice: {len(series)} pts")
             return series, None
@@ -545,8 +482,7 @@ def fetch_daily_prices_with_reason(symbol: str, days: int) -> Tuple[List[Tuple[d
         if isinstance(arr, list) and arr:
             prices = [[row[0], row[4]] for row in arr]
             series = _slice_last_days(_dedupe_by_day(prices), days)
-            payload = [[int(dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000), v]
-                       for d, v in series]
+            payload = [[_ms(d), v] for d, v in series]
             _cache_set(cg_id, days, payload)
             if HIST_DEBUG: print(f"[hist] {sym} OK via ohlc({d_used})->slice: {len(series)} pts")
             return series, None
@@ -558,8 +494,7 @@ def fetch_daily_prices_with_reason(symbol: str, days: int) -> Tuple[List[Tuple[d
         seg = _fetch_range_segmented(cg_id, int(days))
         if seg:
             series = _slice_last_days(_dedupe_by_day(seg), days)
-            payload = [[int(dt.datetime.combine(d, dt.time.min, tzinfo=dt.timezone.utc).timestamp() * 1000), v]
-                       for d, v in series]
+            payload = [[_ms(d), v] for d, v in series]
             _cache_set(cg_id, days, payload)
             if HIST_DEBUG: print(f"[hist] {sym} OK via range(30d): {len(series)} pts")
             return series, None
@@ -785,11 +720,7 @@ class App(tk.Tk):
         ttk.Button(ctl, text="Draw Line (Historical)", command=self.draw_line).pack(side="left", padx=(6, 0))
         ttk.Button(ctl, text="Export Chart (PDF)", command=self.export_current_chart_pdf).pack(side="left", padx=(12, 0))
         ttk.Button(ctl, text="Export Report (PDF)", command=self.action_export_pdf_report).pack(side="left", padx=(6, 0))
-        ttk.Button(
-            ctl,
-            text="Prewarm Cache (365/180/90)",
-            command=self.action_prewarm_cache
-        ).pack(side="left", padx=(6, 0))
+        ttk.Button(ctl, text="Smart Prewarm (365→180/90)", command=self.action_prewarm_cache_smart).pack(side="left", padx=(6, 0))
 
         self.chart_area = ttk.Frame(frame); self.chart_area.pack(fill="both", expand=True, pady=8)
 
@@ -928,56 +859,83 @@ class App(tk.Tk):
         except Exception as e:
             messagebox.showerror("Error", str(e))
 
-    def action_prewarm_cache(self) -> None:
+    # ---------------- Smart Prewarm ----------------
+
+    def action_prewarm_cache_smart(self) -> None:
         """
-        Fetch & cache historical prices for ALL coins in CG_IDS (except stablecoins)
-        for 365, 180 and 90 days. Uses existing caching pipeline so charts are instant.
+        Smart prewarm:
+          - downloads 365d (interval=daily) once per coin,
+          - derives 180d/90d caches locally (slice),
+          - optional env CG_PREWARM_COINS=BTC,ETH,SOL to limit,
+          - stops early if rate-limit persists.
         """
-        try:
-            coins = sorted([c for c in CG_IDS.keys() if c.upper() not in STABLES])
-            days_list = [365, 180, 90]
+        messagebox.showinfo(
+            "Smart prewarm",
+            "Caching historical series for mapped coins (365 days only).\n"
+            "We will derive 180/90 day caches locally to minimize API calls.\n"
+            "Tip: set CG_PREWARM_COINS=BTC,ETH,SOL,... to limit the batch."
+        )
 
-            if not coins:
-                messagebox.showinfo("Prewarm", "No coins to prewarm.");
-                return
+        env_list = os.getenv("CG_PREWARM_COINS", "").strip()
+        if env_list:
+            symbols = [s.strip().upper() for s in env_list.split(",") if s.strip()]
+            symbols = [s for s in symbols if s in CG_IDS and s not in STABLES]
+        else:
+            symbols = [s for s in sorted(CG_IDS.keys()) if s not in STABLES]
 
-            messagebox.showinfo(
-                "Prewarm starting",
-                "Caching historical series for all mapped coins "
-                "(365/180/90 days). This may take a while depending on your API limits."
-            )
+        if not symbols:
+            messagebox.showinfo("Smart prewarm", "No symbols to prewarm.")
+            return
 
-            ok, failed = [], []
-            for sym in coins:
-                for d in days_list:
-                    time.sleep(THROTTLE_BETWEEN_COINS_SEC)
-                    try:
-                        series, reason = fetch_daily_prices_with_reason(sym, d)
-                        if series:
-                            ok.append(f"{sym}:{d}")
+        ok, skipped = [], []
+        consecutive_rate_limits = 0
+
+        for sym in symbols:
+            cg_id = CG_IDS[sym]
+            try:
+                # If 365 exists (even stale), slice locally
+                raw365 = _cache_get_raw(cg_id, 365)
+                if raw365:
+                    series365 = _dedupe_by_day(raw365)
+                    # derive 180/90
+                    s180 = series365[-180:] if len(series365) > 180 else series365
+                    s090 = series365[-90:]  if len(series365) > 90  else series365
+                    _cache_set(cg_id, 180, [[_ms(d), v] for d, v in s180])
+                    _cache_set(cg_id, 90,  [[_ms(d), v] for d, v in s090])
+                    ok.append(sym + " (cache)")
+                    consecutive_rate_limits = 0
+                else:
+                    # fetch fresh 365 (daily)
+                    series, reason = fetch_daily_prices_with_reason(sym, 365)
+                    if series:
+                        _cache_set(cg_id, 365, [[_ms(d), v] for d, v in series])
+                        s180 = series[-180:] if len(series) > 180 else series
+                        s090 = series[-90:]  if len(series) > 90  else series
+                        _cache_set(cg_id, 180, [[_ms(d), v] for d, v in s180])
+                        _cache_set(cg_id, 90,  [[_ms(d), v] for d, v in s090])
+                        ok.append(sym)
+                        consecutive_rate_limits = 0
+                    else:
+                        skipped.append(f"{sym}: {reason}")
+                        if reason and ("429" in str(reason) or "rate" in str(reason).lower()):
+                            consecutive_rate_limits += 1
                         else:
-                            failed.append(f"{sym}:{d} -> {reason or 'no data'}")
-                    except Exception as e:
-                        failed.append(f"{sym}:{d} -> {e}")
+                            consecutive_rate_limits = 0
 
-                time.sleep(random.uniform(0.15, 0.45))
+                time.sleep(THROTTLE_BETWEEN_COINS_SEC + random.uniform(0.05, 0.25))
 
-            msg = [f"✅ Cached: {len(ok)} series", f"⚠️ Failed: {len(failed)}"]
-            if failed:
-                try:
-                    logpath = os.path.join(tempfile.gettempdir(), "cg_prewarm_failures.txt")
-                    with open(logpath, "w", encoding="utf-8") as f:
-                        f.write("\n".join(failed))
-                    msg.append(f"(details saved to {logpath})")
-                except Exception:
-                    msg.append("\n- " + "\n- ".join(failed[:20]))
-                    if len(failed) > 20:
-                        msg.append(f"...and {len(failed) - 20} more")
+                if consecutive_rate_limits >= 5:
+                    skipped.append("Stopped early due to persistent rate limit.")
+                    break
+            except Exception as e:
+                skipped.append(f"{sym}: {e}")
 
-            messagebox.showinfo("Prewarm finished", "\n".join(msg))
-
-        except Exception as e:
-            messagebox.showerror("Prewarm error", str(e))
+        msg = []
+        if ok:
+            msg.append(f"✅ Cached: {', '.join(ok[:10])}" + ("…" if len(ok) > 10 else ""))
+        if skipped:
+            msg.append("⚠️ Skipped:\n- " + "\n- ".join(skipped[:10]) + ("…" if len(skipped) > 10 else ""))
+        messagebox.showinfo("Smart prewarm — done", "\n".join(msg) or "Done.")
 
     # ---------------- Alerts tab ----------------
 
@@ -1170,15 +1128,16 @@ class App(tk.Tk):
             messagebox.showerror("Error", str(e))
 
     def action_update_tx(self) -> None:
-        tx_id = self._ask_int("Transaction ID to update"); if_tx = fetch_one(
+        tx_id = self._ask_int("Transaction ID to update")
+        if tx_id is None:
+            return
+        row = fetch_one(
             "SELECT id, coin, transaction_type, amount, price FROM transactions WHERE id = %s;", (tx_id,)
-        ) if tx_id is not None else None
-        if not if_tx:
-            if tx_id is not None:
-                messagebox.showwarning("Not found", f"Transaction {tx_id} does not exist.")
+        )
+        if not row:
+            messagebox.showwarning("Not found", f"Transaction {tx_id} does not exist.")
             return
 
-        row = if_tx
         def submit():
             try:
                 coin = ent_coin.get().strip().upper()

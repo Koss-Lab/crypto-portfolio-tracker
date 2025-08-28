@@ -243,7 +243,8 @@ python3 gui.py
 * Historical charts use caching + backoff; if CoinGecko limits are hit, the app falls back to an approximate line using latest prices.
 * Stablecoins are treated as flat \~\$1 in charts to avoid noise.
 
-
+**Coins performance** 
+* Refer to `COINS.md` for the updates of which coin works, and which don't works yet
 ---
 
 ## 📊 Example Exports
